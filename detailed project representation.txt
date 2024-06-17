@@ -1,0 +1,103 @@
+
+
+
+### Create topics
+```commandline
+docker exec -it kafka1 bash
+
+root@7fb45a59e205:/# kafka/bin/kafka-topics.sh --bootstrap-server kafka2:9092 --create --topic iot-temp-raw --partitions 5 --replication-factor 3
+
+root@7fb45a59e205:/# kafka/bin/kafka-topics.sh --bootstrap-server kafka2:9092 --create --topic iot-temp-enriched --partitions 5 --replication-factor 3
+
+```
+
+### Prepare dataset
+```commandline
+from pyspark.sql import SparkSession, functions as F
+from pyspark.sql.functions import col, split, to_timestamp, year, month, dayofweek, concat_ws
+
+spark = (SparkSession.builder
+.appName("Read From Kafka")
+.getOrCreate())
+
+spark.sparkContext.setLogLevel('ERROR')
+
+
+# Read data from kafka source
+lines = (spark
+.readStream
+.format("kafka")
+.option("kafka.bootstrap.servers", "kafka:9092")
+.option("subscribe", "iot-temp-raw")
+.load())
+
+# Operation
+lines2=lines.selectExpr("CAST(key AS STRING)","CAST(value AS STRING)","topic","partition","offset","timestamp")
+
+split_col=split(col("value"),",")
+
+lines_with_date=lines2.withColumn("noted_date",split_col.getItem(2))
+
+lines_with_timestamp=lines_with_date.withColumn("noted_date_timestamp",to_timestamp(col("noted_date"),"dd-MM-yyyy HH:mm"))
+
+
+lines_with_extra_columns = lines_with_timestamp.withColumn("year", year(col("noted_date_timestamp"))) \
+.withColumn("month", month(col("noted_date_timestamp"))) \
+.withColumn("day_of_week", dayofweek(col("noted_date_timestamp")))
+
+
+
+lines_final = lines_with_extra_columns.withColumn(
+"value",
+concat_ws(",", col("key"), col("value"), col("year"), col("month"), col("day_of_week"))
+).selectExpr("CAST(key AS STRING)", "CAST(value AS STRING)", "topic", "partition", "offset", "timestamp")
+
+
+checkpoint_dir = "file:///tmp/streaming/write_to_kafka"
+
+streamingQuery = (lines_final
+.writeStream
+.format("kafka")
+.outputMode("append")
+.trigger(processingTime="2 second")
+.option("checkpointLocation", checkpoint_dir)
+.option("kafka.bootstrap.servers", "kafka:9092")
+.option("topic", "iot-temp-enriched")
+.start())
+
+# start streaming
+streamingQuery.awaitTermination()
+```
+
+### Data generator
+```commandline
+cd ~/data-generator/
+source datagen/bin/activate
+
+python dataframe_to_kafka.py -t iot-temp-raw -i /home/train/datasets/IOT-temp.csv
+```
+
+
+### Submit Application
+```commandline
+spark-submit --master local --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1,io.delta:delta-core_2.12:2.4.0 streaming_kafka_homework_answer.py
+```
+
+
+## See results in console consumer
+```commandline
+root@58ccadebd20c:/# kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka1:9092 --topic iot-temp-enriched
+0,iot-temp-raw,1,0,2024-02-15 18:53:30.023,__export__.temp_log_196134_bd201015,Room Admin,2018-12-08 09:30:00,29,In,2018,12,7
+2,iot-temp-raw,3,0,2024-02-15 18:53:31.233,__export__.temp_log_196127_522915e3,Room Admin,2018-12-08 09:29:00,41,Out,2018,12,7
+3,iot-temp-raw,3,1,2024-02-15 18:53:31.748,__export__.temp_log_196128_be0919cf,Room Admin,2018-12-08 09:29:00,41,Out,2018,12,7
+4,iot-temp-raw,3,2,2024-02-15 18:53:32.254,__export__.temp_log_196126_d30b72fb,Room Admin,2018-12-08 09:29:00,31,In,2018,12,7
+1,iot-temp-raw,4,0,2024-02-15 18:53:30.565,__export__.temp_log_196131_7bca51bc,Room Admin,2018-12-08 09:30:00,29,In,2018,12,7
+6,iot-temp-raw,3,3,2024-02-15 18:53:33.352,__export__.temp_log_196121_01544d45,Room Admin,2018-12-08 09:28:00,29,In,2018,12,7
+5,iot-temp-raw,0,0,2024-02-15 18:53:32.798,__export__.temp_log_196125_b0fa0b41,Room Admin,2018-12-08 09:29:00,31,In,2018,12,7
+7,iot-temp-raw,4,1,2024-02-15 18:53:33.875,__export__.temp_log_196122_f8b80a9f,Room Admin,2018-12-08 09:28:00,29,In,2018,12,7
+8,iot-temp-raw,2,0,2024-02-15 18:53:34.385,__export__.temp_log_196111_6b7a0848,Room Admin,2018-12-08 09:26:00,29,In,2018,12,7
+9,iot-temp-raw,3,4,2024-02-15 18:53:34.898,__export__.temp_log_196112_e134aebd,Room Admin,2018-12-08 09:26:00,29,In,2018,12,7
+11,iot-temp-raw,3,5,2024-02-15 18:53:35.922,__export__.temp_log_196108_4a983c7e,Room Admin,2018-12-08 09:25:00,42,Out,2018,12,7
+12,iot-temp-raw,3,6,2024-02-15 18:53:36.428,__export__.temp_log_196101_d5ec7633,Room Admin,2018-12-08 09:24:00,29,In,2018,12,7
+10,iot-temp-raw,1,1,2024-02-15 18:53:35.411,__export__.temp_log_196108_4a983c7e,Room Admin,2018-12-08 09:25:00,42,Out,2018,12,7
+```
